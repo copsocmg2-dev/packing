@@ -1,0 +1,10 @@
+selenium
+webdriver-manager
+google-auth
+google-auth-oauthlib
+google-api-python-client
+pytz
+gspread
+oauth2client
+pandas
+openpyxl
