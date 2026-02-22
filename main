@@ -1,4 +1,3 @@
-
 import json
 import os
 import time
@@ -53,7 +52,6 @@ HISTORICO_PROD_SHEET_NAME = "historico_Prod"
 ILOX_HOURLY_SHEET_NAME = "hourly_db"           
 
 # --- Configurações Gerais ---
-EXECUTION_INTERVAL_SECONDS = 15
 TIMEZONE = "America/Sao_Paulo"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -484,94 +482,96 @@ def main():
     sheets = get_sheets_service()
     if not sheets: return
 
+    # Em execuções isoladas via GitHub Actions, essas variáveis locais sempre recomeçarão.
+    # Se você precisar de um controle real de tempo entre execuções, o ideal seria salvar o estado em uma célula da própria planilha.
     last_run_queue_log = 0 
     last_run_daily_ilox = None   
     last_run_hourly_prod = None  
 
-    while True:
-        logging.info(">>> CICLO INICIADO (Modo Teste - Planilha Única) <<<")
-        tz = pytz.timezone(TIMEZONE)
-        now = datetime.now(tz)
-        today_str = now.strftime('%Y-%m-%d')
-        hour_key = now.strftime('%Y-%m-%d-%H')
-        in_time_window = now.minute >= 10 
+    logging.info(">>> CICLO INICIADO (Modo Teste - Planilha Única) <<<")
+    tz = pytz.timezone(TIMEZONE)
+    now = datetime.now(tz)
+    today_str = now.strftime('%Y-%m-%d')
+    hour_key = now.strftime('%Y-%m-%d-%H')
+    in_time_window = now.minute >= 10 
 
-        driver = None
-        try:
-            driver = get_driver()
-            
-            # --- SHOPEE ---
-            if login_shopee(driver):
+    driver = None
+    try:
+        driver = get_driver()
+        
+        # --- SHOPEE ---
+        if login_shopee(driver):
+            try:
+                d_prod = coletar_shopee_produtividade(driver)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, PRODUTIVIDADE_SHEET_NAME, [["ID", "Nome", "Estação", "Ativ", "Horas", "Thru", "In", "Out", "", "", "H", "D"]] + d_prod)
+            except Exception as e: logging.error(f"Erro Prod Real: {e}")
+
+            try:
+                d_r, d_f = coletar_shopee_outbound(driver)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, OUTBOUND_ORIGINAL_SHEET_NAME, [["Op", "Total"] + [f"H-{i}" for i in range(12)]] + d_r)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, OUTBOUND_SHEET_NAME, [["Op", "Total", "Hora", "Eficiência"]] + d_f)
+                
+                d_dock = coletar_shopee_dock(driver)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, DOCK_QUEUE_SHEET_NAME, [["Q", "Veh", "Wait", "Pri", "Tags", "Hld", "Trip", "TName", "Task", "Qty", "Driv", "Typ", "Ag", "Prt", "Asg", "Grp", "Occ", "Sts", "Seq", "Act"]] + d_dock)
+                
+                d_all = coletar_shopee_db_all(driver)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, ALL_TRIPS_SHEET_NAME, [["Trip","Ont","Veh","STA","STD","ATA","ATD","ETA","ETD","Dock","LoadT","Unl","Ld","Plt","Dr","Dr2","Src","Cls","Ag","Upd","Op","Asg","Inb","OInb","Pck","OPck","TPck","TLd","OLd","MTB","AddQ","Sts","Dest","Trn"]] + d_all)
+                
+                d_end = coletar_shopee_historico_ended(driver)
+                write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORY_SHEET_NAME, [["Trp","Sts","Plt","Dr","Ori","Dst","STD","STA","ATD","ATA","ETD","ETA","Ld","Unl","Exp","Pln","ID"]] + d_end)
+            except Exception as e: logging.error(f"Erro Geral Shopee: {e}")
+
+            # Como o código rodará isolado a cada 5min, last_run_queue_log sempre será 0.
+            # Isso significa que ele vai puxar a Queue Log em toda execução. Se for muito pesado, me avise para ajustarmos!
+            if time.time() - last_run_queue_log > 7200:
                 try:
-                    d_prod = coletar_shopee_produtividade(driver)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, PRODUTIVIDADE_SHEET_NAME, [["ID", "Nome", "Estação", "Ativ", "Horas", "Thru", "In", "Out", "", "", "H", "D"]] + d_prod)
-                except Exception as e: logging.error(f"Erro Prod Real: {e}")
+                    d_q = coletar_shopee_queue_log(driver)
+                    write_sheet(sheets, MAIN_SPREADSHEET_ID, QUEUE_LOG_SHEET_NAME, [["ID","QNo","DID","DName","Plate","Act","Arr","Desc","StID","StDesc","Upd","Ts","Asg","Occ","Seq","Op","Trp","Tsk","Reg"]] + d_q)
+                    last_run_queue_log = time.time()
+                except: pass
+        
+        if driver:
+            driver.quit()
+            driver = None
 
+    except Exception as e: 
+        logging.error(f"Erro Fatal Ciclo Shopee: {e}")
+        if driver: driver.quit()
+
+    # --- ILOX ---
+    driver = None
+    try:
+        driver = get_driver()
+        if login_ilox(driver):
+            try:
+                d_hr = coletar_ilox_hora(driver)
+                if d_hr: write_sheet(sheets, MAIN_SPREADSHEET_ID, ILOX_HOURLY_SHEET_NAME, [["Data", "Hora", "Pacotes - Rejeitos ", "Pacotes", "Rejeitos", "Upd"]] + d_hr)
+            except Exception as e: logging.error(f"Erro Ilox Hourly DB: {e}")
+
+            if now.hour == 7 and in_time_window and last_run_daily_ilox != today_str:
                 try:
-                    d_r, d_f = coletar_shopee_outbound(driver)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, OUTBOUND_ORIGINAL_SHEET_NAME, [["Op", "Total"] + [f"H-{i}" for i in range(12)]] + d_r)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, OUTBOUND_SHEET_NAME, [["Op", "Total", "Hora", "Eficiência"]] + d_f)
-                    
-                    d_dock = coletar_shopee_dock(driver)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, DOCK_QUEUE_SHEET_NAME, [["Q", "Veh", "Wait", "Pri", "Tags", "Hld", "Trip", "TName", "Task", "Qty", "Driv", "Typ", "Ag", "Prt", "Asg", "Grp", "Occ", "Sts", "Seq", "Act"]] + d_dock)
-                    
-                    d_all = coletar_shopee_db_all(driver)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, ALL_TRIPS_SHEET_NAME, [["Trip","Ont","Veh","STA","STD","ATA","ATD","ETA","ETD","Dock","LoadT","Unl","Ld","Plt","Dr","Dr2","Src","Cls","Ag","Upd","Op","Asg","Inb","OInb","Pck","OPck","TPck","TLd","OLd","MTB","AddQ","Sts","Dest","Trn"]] + d_all)
-                    
-                    d_end = coletar_shopee_historico_ended(driver)
-                    write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORY_SHEET_NAME, [["Trp","Sts","Plt","Dr","Ori","Dst","STD","STA","ATD","ATA","ETD","ETA","Ld","Unl","Exp","Pln","ID"]] + d_end)
-                except Exception as e: logging.error(f"Erro Geral Shopee: {e}")
+                    d_ontem = coletar_ilox_hora_ontem(driver)
+                    if d_ontem:
+                        write_sheet(sheets, MAIN_SPREADSHEET_ID, HOURLY_DB_ONTEM_SHEET_NAME, [["Dt", "Hr", "Pct-Rej", "Pct", "Rej", "Upd"]] + d_ontem)
+                        last_run_daily_ilox = today_str 
+                except Exception as e: logging.error(f"Erro Ilox D-1: {e}")
 
-                if time.time() - last_run_queue_log > 7200:
-                    try:
-                        d_q = coletar_shopee_queue_log(driver)
-                        write_sheet(sheets, MAIN_SPREADSHEET_ID, QUEUE_LOG_SHEET_NAME, [["ID","QNo","DID","DName","Plate","Act","Arr","Desc","StID","StDesc","Upd","Ts","Asg","Occ","Seq","Op","Trp","Tsk","Reg"]] + d_q)
-                        last_run_queue_log = time.time()
-                    except: pass
-            
-            if driver:
-                driver.quit()
-                driver = None
-
-        except Exception as e: 
-            logging.error(f"Erro Fatal Ciclo Shopee: {e}")
-            if driver: driver.quit()
-
-        # --- ILOX ---
-        driver = None
-        try:
-            driver = get_driver()
-            if login_ilox(driver):
+            if in_time_window and last_run_hourly_prod != hour_key:
                 try:
-                    d_hr = coletar_ilox_hora(driver)
-                    if d_hr: write_sheet(sheets, MAIN_SPREADSHEET_ID, ILOX_HOURLY_SHEET_NAME, [["Data", "Hora", "Pacotes - Rejeitos ", "Pacotes", "Rejeitos", "Upd"]] + d_hr)
-                except Exception as e: logging.error(f"Erro Ilox Hourly DB: {e}")
+                    d_hist = coletar_ilox_historico_prod(driver)
+                    if d_hist:
+                        h = ["Dt", "Hr", "Proc", "Cls", "RejT", "ReindT", "SortT", "NoDt", "NoRd", "NoCd", "NoDst", "NoStd", "Over", "Late", "Tout", "NoGp", "Mul", "Full", "NSort", "Side", "Ini", "Fim"]
+                        write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORICO_PROD_SHEET_NAME, [h] + d_hist)
+                        last_run_hourly_prod = hour_key
+                except Exception as e: logging.error(f"Erro Ilox Hist Prod: {e}")
 
-                if now.hour == 7 and in_time_window and last_run_daily_ilox != today_str:
-                    try:
-                        d_ontem = coletar_ilox_hora_ontem(driver)
-                        if d_ontem:
-                            write_sheet(sheets, MAIN_SPREADSHEET_ID, HOURLY_DB_ONTEM_SHEET_NAME, [["Dt", "Hr", "Pct-Rej", "Pct", "Rej", "Upd"]] + d_ontem)
-                            last_run_daily_ilox = today_str 
-                    except Exception as e: logging.error(f"Erro Ilox D-1: {e}")
+        if driver: driver.quit()
+    except Exception as e:
+        logging.error(f"Erro Fatal Ciclo Ilox: {e}")
+        if driver: driver.quit()
 
-                if in_time_window and last_run_hourly_prod != hour_key:
-                    try:
-                        d_hist = coletar_ilox_historico_prod(driver)
-                        if d_hist:
-                            h = ["Dt", "Hr", "Proc", "Cls", "RejT", "ReindT", "SortT", "NoDt", "NoRd", "NoCd", "NoDst", "NoStd", "Over", "Late", "Tout", "NoGp", "Mul", "Full", "NSort", "Side", "Ini", "Fim"]
-                            write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORICO_PROD_SHEET_NAME, [h] + d_hist)
-                            last_run_hourly_prod = hour_key
-                    except Exception as e: logging.error(f"Erro Ilox Hist Prod: {e}")
-
-            if driver: driver.quit()
-        except Exception as e:
-            logging.error(f"Erro Fatal Ciclo Ilox: {e}")
-            if driver: driver.quit()
-
-        gc.collect()
-        logging.info(f"Dormindo {EXECUTION_INTERVAL_SECONDS}s...")
-        time.sleep(EXECUTION_INTERVAL_SECONDS)
+    gc.collect()
+    logging.info(">>> CICLO FINALIZADO <<<")
 
 if __name__ == "__main__":
     main()
