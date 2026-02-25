@@ -16,6 +16,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service as ChromeService
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- Importações do Google Sheets ---
 from google.oauth2 import service_account
@@ -430,7 +432,9 @@ def get_driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--log-level=3")
-    return webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=opts)
+
+    # O próprio Selenium baixa e gerencia o driver agora!
+    return webdriver.Chrome(options=opts)
 
 def get_sheets_service():
     if not os.path.exists("service_account.json"):
