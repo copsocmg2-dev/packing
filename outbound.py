@@ -9,8 +9,6 @@ import pytz
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.chrome.service import Service as ChromeService
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
@@ -361,8 +359,8 @@ def login_selenium_inicial():
     options.add_argument("--log-level=3")
     
     try:
-        service = ChromeService(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=options)
+        # O Selenium 4 já acha e baixa o driver correto nativamente!
+        driver = webdriver.Chrome(options=options)
         
         if login_shopee(driver):
             logging.info("Sessão ativa e pronta.")
