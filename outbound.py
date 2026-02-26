@@ -28,7 +28,7 @@ from googleapiclient.errors import HttpError
 SPX_USERNAME = os.environ.get("SPX_USERNAME", "Ops107156")
 SPX_PASSWORD = os.environ.get("SPX_PASSWORD", "SuaSenhaAqui") # Configure no Secrets do GitHub
 
-STAGING_SPREADSHEET_ID = "1krh7Ui5sZbpegVrtiHIV8j3-rn-85htHjZ6yhNINdns"
+STAGING_SPREADSHEET_ID = "16hmhjLLu-TNIa17gLLBPN_IGvymdO7lL1yUn3NlrdKg"
 
 # Nomes das Abas e Configurações Google
 STAGING_SHEET_NAME = "staging_area_data"
