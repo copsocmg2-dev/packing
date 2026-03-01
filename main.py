@@ -31,8 +31,10 @@ SPX_PASSWORD = os.environ.get("SPX_PASSWORD", "Du96574892*")
 ILOX_EMAIL = os.environ.get("ILOX_EMAIL", "joao.franco@shopee.com")
 ILOX_SENHA = os.environ.get("ILOX_SENHA", "123")
 
-# --- ID DA PLANILHA DE TESTE (CENTRALIZADA) ---
+# --- IDs das Planilhas ---
 MAIN_SPREADSHEET_ID = "1wduCsbPhCCcGzqhugm8zeSAPui-_ibZzJBP2jBkwGQ4"
+CONFIG_SPREADSHEET_ID = "1VC9BmvUKWH-fhjdHAU2q8R0O-HKSR2MPUk5dlufbeqM"  # Planilha de Configs do Cookie
+SOCS_SPREADSHEET_ID = "1s_lOk0ykuMZcVgha81MexIGD5JKBNr4hlkIwaT76kvw"    # Planilha Destino do DB All Socs
 
 # --- Nomes das Abas ---
 # Shopee
@@ -43,6 +45,7 @@ DOCK_QUEUE_SHEET_NAME = "raw_spx_dock_queue"
 QUEUE_LOG_SHEET_NAME = "queue-list-log"
 HISTORY_SHEET_NAME = "db_ended"
 ALL_TRIPS_SHEET_NAME = "db_all"
+ALL_TRIPS_SOCS_SHEET_NAME = "db_all_socs" # Aba nova do SoC
 
 # Ilox
 HOURLY_DB_ONTEM_SHEET_NAME = "hourly_db_ontem" 
@@ -61,6 +64,7 @@ QUEUE_LOG_API_URL = "https://spx.shopee.com.br/api/in-station/dock_management/qu
 HISTORY_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/history/list"
 PENDING_TRIPS_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/list_v2"
 DEPARTED_TRIPS_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/list"
+ADMIN_TRIP_LIST_API = "https://spx.shopee.com.br/api/admin/transportation/trip/list" # Usado pelo SoC
 
 # Ilox URLs
 ILOX_DASHBOARD_URL = "https://iloxconnect.com/dashboard.php"
@@ -181,6 +185,51 @@ def calcular_periodos_coleta():
         curr = prox
     return periodos
 
+# --- UTILITÁRIOS PARA LOGIN VIA COOKIE (DB ALL SOCS) ---
+def obter_cookie_da_planilha(service):
+    try:
+        logging.info("Lendo Cookie da planilha config...")
+        result = service.spreadsheets().values().get(
+            spreadsheetId=CONFIG_SPREADSHEET_ID, 
+            range="config!A1:B15"
+        ).execute()
+        rows = result.get('values', [])
+        cookie_str = ""
+        for row in rows:
+            if len(row) >= 2:
+                chave = row[0].strip().upper()
+                valor = row[1].strip()
+                if chave == "COOKIE":
+                    cookie_str = valor
+                elif chave == "FULL_HEADERS_JSON" and not cookie_str:
+                    try:
+                        headers_json = json.loads(valor)
+                        cookie_str = headers_json.get("cookie", "")
+                    except: pass
+        return cookie_str
+    except Exception as e:
+        logging.error(f"Erro ao ler planilha: {e}")
+        return ""
+
+def injetar_cookie(driver, cookie_str):
+    driver.get("https://spx.shopee.com.br/")
+    time.sleep(2)
+    if not cookie_str: return False
+    try:
+        logging.info("Injetando cookie no navegador...")
+        cookies = cookie_str.split(';')
+        for c in cookies:
+            if '=' in c:
+                name, value = c.split('=', 1)
+                driver.add_cookie({'name': name.strip(), 'value': value.strip(), 'domain': '.shopee.com.br', 'path': '/'})
+        driver.get("https://spx.shopee.com.br/hubLinehaulTrips/trip")
+        time.sleep(6)
+        if "/login" not in driver.current_url: return True
+        return False
+    except Exception as e:
+        logging.error(f"Erro ao injetar cookies: {e}")
+        return False
+
 # =================================================================
 # FUNÇÕES DE COLETA SHOPEE
 # =================================================================
@@ -261,6 +310,80 @@ def coletar_shopee_db_all(driver):
                     combined.append([i.get('trip_number'), traduzir_indicador_ontime(st.get('on_time_indicator')), i.get('vehicle_type_name'), formatar_timestamp_trips(st.get('sta'), tz), formatar_timestamp_trips(st.get('std'), tz), formatar_timestamp_trips(st.get('ata'), tz), formatar_timestamp_trips(st.get('atd'), tz), formatar_timestamp_trips(st.get('eta'), tz), formatar_timestamp_trips(st.get('etd'), tz), formatar_docks(st.get('outbound_dock_infos')), formatar_timestamp_trips(st.get('loading_time'), tz), st.get('unload_quantity', 0), st.get('load_quantity', 0), i.get('vehicle_number'), i.get('driver_name'), i.get('second_driver_name'), "Adhoc" if i.get('trip_source')==1 else "Schedule", i.get('classification_names'), i.get('agency_name'), formatar_timestamp_trips(i.get('mtime'), tz), i.get('operator'), formatar_timestamp_trips(i.get('assigned_time'), tz), i.get('to_inbound_quantity', -1), i.get('order_inbound_quantity', -1), i.get('pack_type', ''), i.get('order_packed_quantity', -1), i.get('to_packed_quantity', -1), i.get('to_loaded_quantity', -1), i.get('order_loaded_quantity', -1), i.get('mtb_loaded_quantity', 0), formatar_timestamp_trips(st.get('add_into_queue_time'), tz), mapear_status_db_all(st.get('trip_station_status'), 'parada'), stats[-1]['station_name'] if stats else '', determinar_turno(st.get('sta'), tz)])
                     proc.add(tid); break
     process(pend); process(dep, True); process(all_tr)
+    return combined
+
+def coletar_shopee_db_all_socs(driver):
+    """Nova Coleta do DB ALL focada em SOCs (Filtro Seq 1 e 2) - Usa Cookie"""
+    logging.info("--- [SPX] DB All SOCS (Filtros Ativos Seq 1 e 2) ---")
+    tz = pytz.timezone(TIMEZONE)
+    referer = "https://spx.shopee.com.br/hubLinehaulTrips/trip"
+    
+    def buscar_paginas(url_base, params_base):
+        itens, pag = [], 1
+        while True:
+            res = executar_chamada_api(driver, 'GET', f"{url_base}?{params_base}&pageno={pag}", referer)
+            if not res or not res.get("list"): break
+            itens.extend(res["list"])
+            if len(res["list"]) < 100: break
+            pag += 1
+        return itens
+        
+    agora = datetime.now(tz)
+    st_sta = int((agora - timedelta(days=1)).replace(hour=0,minute=0).timestamp())
+    et_sta = int((agora + timedelta(days=3)).replace(hour=23,minute=59).timestamp())
+    
+    ativas = buscar_paginas(ADMIN_TRIP_LIST_API, f"count=100&sta={st_sta},{et_sta}")
+    
+    combined = []
+    proc = set()
+    
+    def process(lst):
+        if not lst: return
+        for i in lst:
+            tid = i.get('trip_number')
+            if tid in proc: continue
+            
+            stats = i.get('trip_station', [])
+            status_geral_viagem = mapear_status_db_all(i.get('trip_status', ''), 'viagem')
+            
+            is_valid_trip = False
+            for st_info in stats:
+                seq_num = int(st_info.get('sequence_number', -1))
+                nome_estacao = st_info.get('station_name', '')
+                status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
+                
+                if seq_num == 2 and "soc" in nome_estacao.lower():
+                    if status_mapped in ["Unseal", "Arrived", "Assigned"] or status_geral_viagem == "Assigned":
+                        is_valid_trip = True
+                        break
+            
+            if is_valid_trip:
+                for st_info in stats:
+                    seq_num = int(st_info.get('sequence_number', -1))
+                    if seq_num in [1, 2]:
+                        nome_estacao = st_info.get('station_name', '')
+                        status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
+                        
+                        combined.append([
+                            i.get('trip_number'), traduzir_indicador_ontime(st_info.get('on_time_indicator')), 
+                            i.get('vehicle_type_name'), formatar_timestamp_trips(st_info.get('sta'), tz), 
+                            formatar_timestamp_trips(st_info.get('std'), tz), formatar_timestamp_trips(st_info.get('ata'), tz), 
+                            formatar_timestamp_trips(st_info.get('atd'), tz), formatar_timestamp_trips(st_info.get('eta'), tz), 
+                            formatar_timestamp_trips(st_info.get('etd'), tz), formatar_docks(st_info.get('outbound_dock_infos')), 
+                            formatar_timestamp_trips(st_info.get('loading_time'), tz), st_info.get('unload_quantity', 0), 
+                            st_info.get('load_quantity', 0), i.get('vehicle_number'), i.get('driver_name'), 
+                            i.get('second_driver_name'), "Adhoc" if i.get('trip_source')==1 else "Schedule", 
+                            i.get('classification_names'), i.get('agency_name'), formatar_timestamp_trips(i.get('mtime'), tz), 
+                            i.get('operator'), formatar_timestamp_trips(i.get('assigned_time'), tz), 
+                            i.get('to_inbound_quantity', -1), i.get('order_inbound_quantity', -1), i.get('pack_type', ''), 
+                            i.get('order_packed_quantity', -1), i.get('to_packed_quantity', -1), i.get('to_loaded_quantity', -1), 
+                            i.get('order_loaded_quantity', -1), i.get('mtb_loaded_quantity', 0), 
+                            formatar_timestamp_trips(st_info.get('add_into_queue_time'), tz), status_mapped, 
+                            nome_estacao, determinar_turno(st_info.get('sta'), tz), seq_num
+                        ])
+            proc.add(tid)
+                    
+    process(ativas)
     return combined
 
 def coletar_shopee_historico_ended(driver):
@@ -353,7 +476,6 @@ def coletar_ilox_historico_prod(driver):
     logging.info("--- [ILOX] Historico Prod (Hora x Hora) ---")
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
-    # Pega do inicio do dia até a hora atual fechada
     start_date = (now if now.hour >= 6 else now - timedelta(days=1)).replace(hour=6, minute=0, second=0)
     end_date = now + timedelta(hours=1)
     curr, rows = start_date, []
@@ -376,7 +498,6 @@ def login_shopee(driver):
         time.sleep(3)
         if "/login" not in driver.current_url: return True
         logging.info("Logando Shopee...")
-        # Fecha popup se existir antes de logar
         try: driver.find_element(By.CLASS_NAME, "ant-modal-close-x").click()
         except: pass
 
@@ -390,7 +511,6 @@ def login_shopee(driver):
         p.send_keys(Keys.ENTER)
         
         time.sleep(5)
-        # Verifica se logou ou se tem popup bloqueando
         try: driver.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
         except: pass
         
@@ -428,8 +548,8 @@ def get_driver():
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--log-level=3")
-
-    # O próprio Selenium baixa e gerencia o driver agora!
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    opts.add_argument(f"--user-agent={user_agent}")
     return webdriver.Chrome(options=opts)
 
 def get_sheets_service():
@@ -447,7 +567,6 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 def ensure_sheet_exists(service, spreadsheet_id, sheet_name):
-    """Verifica se a aba existe. Se não, cria."""
     try:
         sheet_metadata = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
         sheets = sheet_metadata.get('sheets', [])
@@ -456,14 +575,13 @@ def ensure_sheet_exists(service, spreadsheet_id, sheet_name):
             logging.info(f"Criando aba inexistente: {sheet_name}")
             req = {'requests': [{'addSheet': {'properties': {'title': sheet_name}}}]}
             service.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body=req).execute()
-            time.sleep(1) # Espera propagar
+            time.sleep(1)
     except Exception as e:
         logging.error(f"Erro ao verificar/criar aba {sheet_name}: {e}")
 
 def write_sheet(service, spreadsheet_id, sheet_name, data, mode="write"):
     if not data: return
     try:
-        # --- NOVO: Garante que a aba existe antes de escrever ---
         ensure_sheet_exists(service, spreadsheet_id, sheet_name)
         
         if mode == "write":
@@ -472,7 +590,10 @@ def write_sheet(service, spreadsheet_id, sheet_name, data, mode="write"):
         else:
             service.spreadsheets().values().append(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A1", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={'values': data}).execute()
         
-        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # Correção da Hora do Vercel aplicada aqui
+        tz = pytz.timezone(TIMEZONE)
+        ts = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+        
         service.spreadsheets().values().append(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:B", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={'values': [["Última Atualização:", ts]]}).execute()
         logging.info(f"Planilha {sheet_name} atualizada com sucesso.")
     except Exception as e: logging.error(f"Erro Sheet {sheet_name}: {e}")
@@ -482,24 +603,23 @@ def main():
     sheets = get_sheets_service()
     if not sheets: return
 
-    # Em execuções isoladas via GitHub Actions, essas variáveis locais sempre recomeçarão.
-    # Se você precisar de um controle real de tempo entre execuções, o ideal seria salvar o estado em uma célula da própria planilha.
     last_run_queue_log = 0 
     last_run_daily_ilox = None   
     last_run_hourly_prod = None  
 
-    logging.info(">>> CICLO INICIADO (Modo Teste - Planilha Única) <<<")
+    logging.info(">>> CICLO INICIADO (Modo Teste - Vercel) <<<")
     tz = pytz.timezone(TIMEZONE)
     now = datetime.now(tz)
     today_str = now.strftime('%Y-%m-%d')
     hour_key = now.strftime('%Y-%m-%d-%H')
     in_time_window = now.minute >= 10 
 
+    # =========================================================
+    # BLOCO 1: SHOPEE (LOGIN VIA SENHA)
+    # =========================================================
     driver = None
     try:
         driver = get_driver()
-        
-        # --- SHOPEE ---
         if login_shopee(driver):
             try:
                 d_prod = coletar_shopee_produtividade(driver)
@@ -521,8 +641,6 @@ def main():
                 write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORY_SHEET_NAME, [["Trp","Sts","Plt","Dr","Ori","Dst","STD","STA","ATD","ATA","ETD","ETA","Ld","Unl","Exp","Pln","ID"]] + d_end)
             except Exception as e: logging.error(f"Erro Geral Shopee: {e}")
 
-            # Como o código rodará isolado a cada 5min, last_run_queue_log sempre será 0.
-            # Isso significa que ele vai puxar a Queue Log em toda execução. Se for muito pesado, me avise para ajustarmos!
             if time.time() - last_run_queue_log > 7200:
                 try:
                     d_q = coletar_shopee_queue_log(driver)
@@ -535,22 +653,57 @@ def main():
             driver = None
 
     except Exception as e: 
-        logging.error(f"Erro Fatal Ciclo Shopee: {e}")
+        logging.error(f"Erro Fatal Ciclo Shopee Senha: {e}")
         if driver: driver.quit()
 
-    # --- ILOX ---
-    driver = None
+
+    # =========================================================
+    # BLOCO 2: SHOPEE SOCS (NOVO - LOGIN VIA COOKIE)
+    # =========================================================
+    driver_cookie = None
     try:
-        driver = get_driver()
-        if login_ilox(driver):
+        cookie_da_planilha = obter_cookie_da_planilha(sheets)
+        if cookie_da_planilha:
+            driver_cookie = get_driver()
+            if injetar_cookie(driver_cookie, cookie_da_planilha):
+                d_socs = coletar_shopee_db_all_socs(driver_cookie)
+                if d_socs:
+                    cabecalho_socs = [[
+                        "Trip Number", "On-Time Indicator", "Vehicle Type", "STA", "STD", "ATA", "ATD", "ETA", "ETD", 
+                        "Outbound Docks", "Loading Time", "Unload Quantity", "Load Quantity", "Vehicle Number", 
+                        "Driver Name", "Second Driver Name", "Trip Source", "Classification", "Agency Name", 
+                        "Updated Time", "Operator", "Assigned Time", "To Inbound Quantity", "Order Inbound Quantity", 
+                        "Pack Type", "Order Packed Quantity", "To Packed Quantity", "To Loaded Quantity", 
+                        "Order Loaded Quantity", "MTB Loaded Quantity", "Add Into Queue Time", "Station Status", 
+                        "Station Name", "Shift", "Sequence Number"
+                    ]]
+                    # Obs: Enviando para a planilha original do SoC para não perder o seu padrão, mas você pode mudar para MAIN_SPREADSHEET_ID se quiser centralizar.
+                    write_sheet(sheets, SOCS_SPREADSHEET_ID, ALL_TRIPS_SOCS_SHEET_NAME, cabecalho_socs + d_socs)
+        
+        if driver_cookie:
+            driver_cookie.quit()
+            driver_cookie = None
+
+    except Exception as e:
+        logging.error(f"Erro Fatal Ciclo Shopee Cookie: {e}")
+        if driver_cookie: driver_cookie.quit()
+
+
+    # =========================================================
+    # BLOCO 3: ILOX (LOGIN VIA SENHA)
+    # =========================================================
+    driver_ilox = None
+    try:
+        driver_ilox = get_driver()
+        if login_ilox(driver_ilox):
             try:
-                d_hr = coletar_ilox_hora(driver)
+                d_hr = coletar_ilox_hora(driver_ilox)
                 if d_hr: write_sheet(sheets, MAIN_SPREADSHEET_ID, ILOX_HOURLY_SHEET_NAME, [["Data", "Hora", "Pacotes - Rejeitos ", "Pacotes", "Rejeitos", "Upd"]] + d_hr)
             except Exception as e: logging.error(f"Erro Ilox Hourly DB: {e}")
 
             if now.hour == 7 and in_time_window and last_run_daily_ilox != today_str:
                 try:
-                    d_ontem = coletar_ilox_hora_ontem(driver)
+                    d_ontem = coletar_ilox_hora_ontem(driver_ilox)
                     if d_ontem:
                         write_sheet(sheets, MAIN_SPREADSHEET_ID, HOURLY_DB_ONTEM_SHEET_NAME, [["Dt", "Hr", "Pct-Rej", "Pct", "Rej", "Upd"]] + d_ontem)
                         last_run_daily_ilox = today_str 
@@ -558,17 +711,17 @@ def main():
 
             if in_time_window and last_run_hourly_prod != hour_key:
                 try:
-                    d_hist = coletar_ilox_historico_prod(driver)
+                    d_hist = coletar_ilox_historico_prod(driver_ilox)
                     if d_hist:
                         h = ["Dt", "Hr", "Proc", "Cls", "RejT", "ReindT", "SortT", "NoDt", "NoRd", "NoCd", "NoDst", "NoStd", "Over", "Late", "Tout", "NoGp", "Mul", "Full", "NSort", "Side", "Ini", "Fim"]
                         write_sheet(sheets, MAIN_SPREADSHEET_ID, HISTORICO_PROD_SHEET_NAME, [h] + d_hist)
                         last_run_hourly_prod = hour_key
                 except Exception as e: logging.error(f"Erro Ilox Hist Prod: {e}")
 
-        if driver: driver.quit()
+        if driver_ilox: driver_ilox.quit()
     except Exception as e:
         logging.error(f"Erro Fatal Ciclo Ilox: {e}")
-        if driver: driver.quit()
+        if driver_ilox: driver_ilox.quit()
 
     gc.collect()
     logging.info(">>> CICLO FINALIZADO <<<")
