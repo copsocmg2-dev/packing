@@ -1,28 +1,36 @@
 export default async function handler(req, res) {
-  // O token que configurou nas variáveis de ambiente da Vercel
   const GITHUB_TOKEN = process.env.GH_TOKEN; 
-  
-  // ATENÇÃO: Substitua pelos seus dados corretos
-  const OWNER = "copsocmg2-dev"; // Pelo caminho da pasta, parece ser este o seu utilizador/organização
-  const REPO = "packing"; // O nome do seu repositório no GitHub
+  const OWNER = "copsocmg2-dev"; 
+  const REPO = "packing"; 
 
-  try {
-    const response = await fetch(`https://api.github.com/repos/${OWNER}/${REPO}/dispatches`, {
+  // Função auxiliar para disparar um evento específico no GitHub
+  const dispatchGitHubEvent = async (eventType) => {
+    return fetch(`https://api.github.com/repos/${OWNER}/${REPO}/dispatches`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${GITHUB_TOKEN}`,
         "Accept": "application/vnd.github.v3+json",
         "Content-Type": "application/json",
       },
-      // Este nome tem de ser exatamente igual ao que está no main.yml
-      body: JSON.stringify({ event_type: "trigger_robo_logistica" }), 
+      body: JSON.stringify({ event_type: eventType }), 
     });
+  };
 
-    if (response.ok) {
-      res.status(200).send("Robô acionado com sucesso no GitHub!");
+  try {
+    // Dispara os dois workflows simultaneamente usando Promise.all
+    const [mainResponse, outboundResponse] = await Promise.all([
+      dispatchGitHubEvent("trigger_robo_logistica"),
+      dispatchGitHubEvent("trigger_robo_outbound")
+    ]);
+
+    if (mainResponse.ok && outboundResponse.ok) {
+      res.status(200).send("Robôs Logística e Outbound acionados com sucesso no GitHub!");
     } else {
-      const errorText = await response.text();
-      res.status(500).send(`Erro ao acionar robô: ${errorText}`);
+      // Se algum deles falhar, tentamos capturar o erro
+      const errorTextMain = await mainResponse.text().catch(() => "Sem detalhes");
+      const errorTextOutbound = await outboundResponse.text().catch(() => "Sem detalhes");
+      
+      res.status(500).send(`Erro ao acionar robôs. Main: ${errorTextMain} | Outbound: ${errorTextOutbound}`);
     }
   } catch (error) {
     res.status(500).send(`Erro interno: ${error.message}`);
