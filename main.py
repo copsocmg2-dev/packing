@@ -610,15 +610,8 @@ def main():
     if not sheets: return
 
     last_run_queue_log = 0 
-    last_run_daily_ilox = None   
-    last_run_hourly_prod = None  
 
-    logging.info(">>> CICLO INICIADO (Modo Teste - Vercel) <<<")
-    tz = pytz.timezone(TIMEZONE)
-    now = datetime.now(tz)
-    today_str = now.strftime('%Y-%m-%d')
-    hour_key = now.strftime('%Y-%m-%d-%H')
-    in_time_window = now.minute >= 10 
+    logging.info(">>> CICLO INICIADO <<<")
 
     # =========================================================
     # BLOCO 1: SHOPEE (LOGIN VIA SENHA)
@@ -629,28 +622,28 @@ def main():
         if login_shopee(driver):
             try:
                 d_prod = coletar_shopee_produtividade(driver)
-                write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, PRODUTIVIDADE_SHEET_NAME, [["ID", "Nome", "Estação", "Ativ", "Horas", "Thru", "In", "Out", "", "", "H", "D"]] + d_prod)
+                if d_prod: write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, PRODUTIVIDADE_SHEET_NAME, [["ID", "Nome", "Estação", "Ativ", "Horas", "Thru", "In", "Out", "", "", "H", "D"]] + d_prod)
             except Exception as e: logging.error(f"Erro Prod Real: {e}")
 
             try:
                 d_r, d_f = coletar_shopee_outbound(driver)
-                write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, OUTBOUND_ORIGINAL_SHEET_NAME, [["Op", "Total"] + [f"H-{i}" for i in range(12)]] + d_r)
-                write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, OUTBOUND_SHEET_NAME, [["Op", "Total", "Hora", "Eficiência"]] + d_f)
+                if d_r: write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, OUTBOUND_ORIGINAL_SHEET_NAME, [["Op", "Total"] + [f"H-{i}" for i in range(12)]] + d_r)
+                if d_f: write_sheet(sheets, PROD_OUTBOUND_SPREADSHEET_ID, OUTBOUND_SHEET_NAME, [["Op", "Total", "Hora", "Eficiência"]] + d_f)
                 
                 d_dock = coletar_shopee_dock(driver)
-                write_sheet(sheets, DOCK_QUEUE_SPREADSHEET_ID, DOCK_QUEUE_SHEET_NAME, [["Q", "Veh", "Wait", "Pri", "Tags", "Hld", "Trip", "TName", "Task", "Qty", "Driv", "Typ", "Ag", "Prt", "Asg", "Grp", "Occ", "Sts", "Seq", "Act"]] + d_dock)
+                if d_dock: write_sheet(sheets, DOCK_QUEUE_SPREADSHEET_ID, DOCK_QUEUE_SHEET_NAME, [["Q", "Veh", "Wait", "Pri", "Tags", "Hld", "Trip", "TName", "Task", "Qty", "Driv", "Typ", "Ag", "Prt", "Asg", "Grp", "Occ", "Sts", "Seq", "Act"]] + d_dock)
                 
                 d_all = coletar_shopee_db_all(driver)
-                write_sheet(sheets, DB_ALL_SPREADSHEET_ID, ALL_TRIPS_SHEET_NAME, [["Trip","Ont","Veh","STA","STD","ATA","ATD","ETA","ETD","Dock","LoadT","Unl","Ld","Plt","Dr","Dr2","Src","Cls","Ag","Upd","Op","Asg","Inb","OInb","Pck","OPck","TPck","TLd","OLd","MTB","AddQ","Sts","Dest","Trn"]] + d_all)
+                if d_all: write_sheet(sheets, DB_ALL_SPREADSHEET_ID, ALL_TRIPS_SHEET_NAME, [["Trip","Ont","Veh","STA","STD","ATA","ATD","ETA","ETD","Dock","LoadT","Unl","Ld","Plt","Dr","Dr2","Src","Cls","Ag","Upd","Op","Asg","Inb","OInb","Pck","OPck","TPck","TLd","OLd","MTB","AddQ","Sts","Dest","Trn"]] + d_all)
                 
                 d_end = coletar_shopee_historico_ended(driver)
-                write_sheet(sheets, HISTORY_SPREADSHEET_ID, HISTORY_SHEET_NAME, [["Trp","Sts","Plt","Dr","Ori","Dst","STD","STA","ATD","ATA","ETD","ETA","Ld","Unl","Exp","Pln","ID"]] + d_end)
+                if d_end: write_sheet(sheets, HISTORY_SPREADSHEET_ID, HISTORY_SHEET_NAME, [["Trp","Sts","Plt","Dr","Ori","Dst","STD","STA","ATD","ATA","ETD","ETA","Ld","Unl","Exp","Pln","ID"]] + d_end)
             except Exception as e: logging.error(f"Erro Geral Shopee: {e}")
 
             if time.time() - last_run_queue_log > 7200:
                 try:
                     d_q = coletar_shopee_queue_log(driver)
-                    write_sheet(sheets, DOCK_QUEUE_SPREADSHEET_ID, QUEUE_LOG_SHEET_NAME, [["ID","QNo","DID","DName","Plate","Act","Arr","Desc","StID","StDesc","Upd","Ts","Asg","Occ","Seq","Op","Trp","Tsk","Reg"]] + d_q)
+                    if d_q: write_sheet(sheets, DOCK_QUEUE_SPREADSHEET_ID, QUEUE_LOG_SHEET_NAME, [["ID","QNo","DID","DName","Plate","Act","Arr","Desc","StID","StDesc","Upd","Ts","Asg","Occ","Seq","Op","Trp","Tsk","Reg"]] + d_q)
                     last_run_queue_log = time.time()
                 except: pass
         
@@ -683,7 +676,6 @@ def main():
                         "Order Loaded Quantity", "MTB Loaded Quantity", "Add Into Queue Time", "Station Status", 
                         "Station Name", "Shift", "Sequence Number"
                     ]]
-                    
                     write_sheet(sheets, SOCS_SPREADSHEET_ID, ALL_TRIPS_SOCS_SHEET_NAME, cabecalho_socs + d_socs)
         
         if driver_cookie:
@@ -704,25 +696,25 @@ def main():
         if login_ilox(driver_ilox):
             try:
                 d_hr = coletar_ilox_hora(driver_ilox)
-                if d_hr: write_sheet(sheets, ILOX_SPREADSHEET_ID, ILOX_HOURLY_SHEET_NAME, [["Data", "Hora", "Pacotes - Rejeitos ", "Pacotes", "Rejeitos", "Upd"]] + d_hr)
-            except Exception as e: logging.error(f"Erro Ilox Hourly DB: {e}")
+                if d_hr: 
+                    write_sheet(sheets, ILOX_SPREADSHEET_ID, ILOX_HOURLY_SHEET_NAME, [["Data", "Hora", "Pacotes - Rejeitos ", "Pacotes", "Rejeitos", "Upd"]] + d_hr)
+            except Exception as e: 
+                logging.error(f"Erro Ilox Hourly DB: {e}")
 
-            if now.hour == 7 and in_time_window and last_run_daily_ilox != today_str:
-                try:
-                    d_ontem = coletar_ilox_hora_ontem(driver_ilox)
-                    if d_ontem:
-                        write_sheet(sheets, ILOX_SPREADSHEET_ID, HOURLY_DB_ONTEM_SHEET_NAME, [["Dt", "Hr", "Pct-Rej", "Pct", "Rej", "Upd"]] + d_ontem)
-                        last_run_daily_ilox = today_str 
-                except Exception as e: logging.error(f"Erro Ilox D-1: {e}")
+            try:
+                d_ontem = coletar_ilox_hora_ontem(driver_ilox)
+                if d_ontem:
+                    write_sheet(sheets, ILOX_SPREADSHEET_ID, HOURLY_DB_ONTEM_SHEET_NAME, [["Dt", "Hr", "Pct-Rej", "Pct", "Rej", "Upd"]] + d_ontem)
+            except Exception as e: 
+                logging.error(f"Erro Ilox D-1: {e}")
 
-            if in_time_window and last_run_hourly_prod != hour_key:
-                try:
-                    d_hist = coletar_ilox_historico_prod(driver_ilox)
-                    if d_hist:
-                        h = ["Dt", "Hr", "Proc", "Cls", "RejT", "ReindT", "SortT", "NoDt", "NoRd", "NoCd", "NoDst", "NoStd", "Over", "Late", "Tout", "NoGp", "Mul", "Full", "NSort", "Side", "Ini", "Fim"]
-                        write_sheet(sheets, ILOX_SPREADSHEET_ID, HISTORICO_PROD_SHEET_NAME, [h] + d_hist)
-                        last_run_hourly_prod = hour_key
-                except Exception as e: logging.error(f"Erro Ilox Hist Prod: {e}")
+            try:
+                d_hist = coletar_ilox_historico_prod(driver_ilox)
+                if d_hist:
+                    h = ["Dt", "Hr", "Proc", "Cls", "RejT", "ReindT", "SortT", "NoDt", "NoRd", "NoCd", "NoDst", "NoStd", "Over", "Late", "Tout", "NoGp", "Mul", "Full", "NSort", "Side", "Ini", "Fim"]
+                    write_sheet(sheets, ILOX_SPREADSHEET_ID, HISTORICO_PROD_SHEET_NAME, [h] + d_hist)
+            except Exception as e: 
+                logging.error(f"Erro Ilox Hist Prod: {e}")
 
         if driver_ilox: driver_ilox.quit()
     except Exception as e:
