@@ -429,27 +429,61 @@ def coletar_shopee_queue_log(driver):
 # =================================================================
 
 def coletar_ilox_hora(driver):
-    """(Normal) Coleta Dia Atual Hora a Hora - Roda sempre junto com Produtividade."""
+    """(Normal) Coleta Dia Atual Hora a Hora"""
     logging.info("--- [ILOX] Hourly DB (Normal) ---")
     tz = pytz.timezone(TIMEZONE)
     agora = datetime.now(tz)
-    ini = agora.replace(hour=6,minute=0) if agora.hour >= 6 else (agora-timedelta(days=1)).replace(hour=6,minute=0)
+    
+    # Define o início do dia operacional (6h da manhã)
+    if agora.hour >= 6:
+        ini = agora.replace(hour=6, minute=0, second=0, microsecond=0)
+    else:
+        ini = (agora - timedelta(days=1)).replace(hour=6, minute=0, second=0, microsecond=0)
+    
+    # Fim é o momento atual ou final do dia
     fim = ini + timedelta(hours=23, minutes=59)
+    
+    # Importante: Garantir que o driver está na URL correta antes do fetch
+    if "iloxconnect.com" not in driver.current_url:
+        driver.get(ILOX_DASHBOARD_URL)
+        time.sleep(3)
+
     url_p = f"{ILOX_API_HOURLY_PROD}?unidade_id=1&modo_ativo=PRODUCAO&data_inicio={ini.strftime('%Y-%m-%dT%H:%M')}&data_fim={fim.strftime('%Y-%m-%dT%H:%M')}"
     url_r = f"{ILOX_API_HOURLY_REJ}?unidade_id=1&modo_ativo=PRODUCAO&data_inicio={ini.strftime('%Y-%m-%dT%H:%M')}&data_fim={fim.strftime('%Y-%m-%dT%H:%M')}"
+    
+    logging.info(f"Consultando Ilox de {ini} ate {fim}")
+    
     d_prod = executar_chamada_api(driver, 'GET', url_p, ILOX_DASHBOARD_URL)
     d_rej = executar_chamada_api(driver, 'GET', url_r, ILOX_DASHBOARD_URL)
-    if not d_prod or 'labels' not in d_prod: return []
-    lbls, prods = d_prod.get('labels', []), d_prod.get('data', [])
-    rejs = d_rej.get('data', []) if d_rej else [0]*len(prods)
+    
+    if not d_prod or 'labels' not in d_prod or not d_prod.get('data'):
+        logging.warning("Ilox retornou vazio ou sem dados de produção.")
+        return []
+
+    lbls = d_prod.get('labels', [])
+    prods = d_prod.get('data', [])
+    rejs = d_rej.get('data', []) if (d_rej and 'data' in d_rej) else [0] * len(prods)
+    
     rows = []
-    ts = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
+    ts_update = agora.strftime('%Y-%m-%d %H:%M:%S')
+    
     for i, lbl in enumerate(lbls):
         try:
-            val_p = int(prods[i]) if prods[i] is not None else 0
-            val_r = int(rejs[i]) if i < len(rejs) and rejs[i] is not None else 0
-            rows.append([f"{ini.year}-{lbl.split(' ')[0].split('/')[1]}-{lbl.split(' ')[0].split('/')[0]}", lbl.split(' ')[1], val_p - val_r, val_p, val_r, ts])
-        except: continue
+            # Proteção contra valores None ou strings vazias
+            val_p = int(prods[i]) if (i < len(prods) and prods[i] is not None) else 0
+            val_r = int(rejs[i]) if (i < len(rejs) and rejs[i] is not None) else 0
+            
+            # Formatação da data baseada no label "DD/MM HH:mm"
+            data_parts = lbl.split(' ')
+            dia_mes = data_parts[0].split('/')
+            data_formatada = f"{ini.year}-{dia_mes[1]}-{dia_mes[0]}"
+            hora_formatada = data_parts[1]
+            
+            rows.append([data_formatada, hora_formatada, val_p - val_r, val_p, val_r, ts_update])
+        except Exception as e:
+            logging.error(f"Erro ao processar linha {i} do Ilox: {e}")
+            continue
+            
     return rows
 
 def coletar_ilox_hora_ontem(driver):
