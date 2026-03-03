@@ -98,6 +98,8 @@ def executar_chamada_api(driver, method, url, referer, payload=None):
             time.sleep(2)
         
         headers = {'Referer': referer, 'Content-Type': 'application/json'}
+        
+        # --- LÓGICA DE TOKEN DA SHOPEE ---
         if "shopee" in url:
             headers['App'] = 'FMS Portal'
             token = None
@@ -110,6 +112,27 @@ def executar_chamada_api(driver, method, url, referer, payload=None):
                 token = driver.execute_script("return (document.cookie.match(/csrftoken=([^;]+)/) || [])[1];")
             
             if token: headers['x-csrftoken'] = token
+            
+        # --- LÓGICA DE TOKEN DO ILOX (CORREÇÃO APLICADA) ---
+        elif "ilox" in url:
+            csrf_token = driver.execute_script("""
+                let meta = document.querySelector('meta[name="csrf-token"]') || 
+                           document.querySelector('meta[name="x-csrf-token"]');
+                if (meta) return meta.content;
+
+                let ls = localStorage.getItem('csrf_token') || sessionStorage.getItem('csrf_token');
+                if (ls) return ls;
+
+                let match = document.cookie.match(new RegExp('(^| )XSRF-TOKEN=([^;]+)'));
+                if (match) return decodeURIComponent(match[2]);
+
+                if (typeof csrfToken !== 'undefined') return csrfToken;
+                if (typeof window.csrf_token !== 'undefined') return window.csrf_token;
+
+                return '';
+            """)
+            if csrf_token:
+                headers['x-csrf-token'] = csrf_token
         
         fetch_opts = f"headers: {json.dumps(headers)}"
         if "ilox" in url: fetch_opts += ", credentials: 'include'"
