@@ -1,1 +1,243 @@
+import json
+import os
+import time
+import logging
+from datetime import datetime, timedelta
+import pytz
 
+# --- Importações do Selenium e Webdriver Manager ---
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+
+# --- Importações do Google Sheets ---
+from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# =================================================================
+# CONFIGURAÇÕES
+# =================================================================
+TIMEZONE = "America/Sao_Paulo"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+CONFIG_SPREADSHEET_ID = "1VC9BmvUKWH-fhjdHAU2q8R0O-HKSR2MPUk5dlufbeqM"
+SOCS_SPREADSHEET_ID = "1s_lOk0ykuMZcVgha81MexIGD5JKBNr4hlkIwaT76kvw"
+ALL_TRIPS_SOCS_SHEET_NAME = "db_all_socs"
+ADMIN_TRIP_LIST_API = "https://spx.shopee.com.br/api/admin/transportation/trip/list"
+
+# =================================================================
+# UTILITÁRIOS E AUTENTICAÇÃO
+# =================================================================
+def get_driver():
+    opts = webdriver.ChromeOptions()
+    opts.add_argument("--headless=new")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--window-size=1920,1080")
+    opts.add_argument("--log-level=3")
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    opts.add_argument(f"--user-agent={user_agent}")
+    return webdriver.Chrome(options=opts)
+
+def get_sheets_service():
+    if not os.path.exists("service_account.json"):
+        creds_env = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        if creds_env:
+            with open("service_account.json", "w") as f: f.write(creds_env)
+    
+    if os.path.exists("service_account.json"): 
+        creds = service_account.Credentials.from_service_account_file("service_account.json", scopes=SCOPES)
+    else: 
+        logging.error("Nenhuma credencial do Google encontrada.")
+        return None
+    return build("sheets", "v4", credentials=creds)
+
+def obter_cookie_da_planilha(service):
+    try:
+        logging.info("Lendo Cookie da planilha config...")
+        result = service.spreadsheets().values().get(spreadsheetId=CONFIG_SPREADSHEET_ID, range="config!A1:B15").execute()
+        rows = result.get('values', [])
+        cookie_str = ""
+        for row in rows:
+            if len(row) >= 2:
+                chave, valor = row[0].strip().upper(), row[1].strip()
+                if chave == "COOKIE": cookie_str = valor
+                elif chave == "FULL_HEADERS_JSON" and not cookie_str:
+                    try: cookie_str = json.loads(valor).get("cookie", "")
+                    except: pass
+        return cookie_str
+    except Exception as e:
+        logging.error(f"Erro ao ler planilha: {e}")
+        return ""
+
+def injetar_cookie(driver, cookie_str):
+    driver.get("https://spx.shopee.com.br/")
+    time.sleep(2)
+    if not cookie_str: return False
+    try:
+        logging.info("Injetando cookie no navegador...")
+        for c in cookie_str.split(';'):
+            if '=' in c:
+                name, value = c.split('=', 1)
+                driver.add_cookie({'name': name.strip(), 'value': value.strip(), 'domain': '.shopee.com.br', 'path': '/'})
+        driver.get("https://spx.shopee.com.br/hubLinehaulTrips/trip")
+        time.sleep(6)
+        return "/login" not in driver.current_url
+    except Exception as e:
+        logging.error(f"Erro ao injetar cookies: {e}")
+        return False
+
+def executar_chamada_api(driver, method, url, referer):
+    try:
+        headers = {'Referer': referer, 'Content-Type': 'application/json', 'App': 'FMS Portal'}
+        token = driver.execute_script("return (document.cookie.match(/csrftoken=([^;]+)/) || [])[1];")
+        if token: headers['x-csrftoken'] = token
+        
+        script = f"return await fetch('{url}', {{method: '{method.upper()}', headers: {json.dumps(headers)} }}).then(res => res.json());"
+        json_response = driver.execute_script(script)
+        
+        if json_response and isinstance(json_response, dict) and json_response.get("retcode", 0) != 0: return None
+        return json_response.get("data")
+    except Exception as e:
+        logging.error(f"Erro request ({url}): {e}")
+        return None
+
+def write_sheet(service, spreadsheet_id, sheet_name, data):
+    if not data: return
+    try:
+        service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'").execute()
+        service.spreadsheets().values().update(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A1", valueInputOption="USER_ENTERED", body={'values': data}).execute()
+        ts = datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d %H:%M:%S')
+        service.spreadsheets().values().append(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A:B", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={'values': [["Última Atualização:", ts]]}).execute()
+        logging.info(f"Planilha {sheet_name} atualizada com sucesso.")
+    except Exception as e: logging.error(f"Erro Sheet {sheet_name}: {e}")
+
+# =================================================================
+# LÓGICA DE NEGÓCIO E FORMATAÇÃO
+# =================================================================
+def formatar_timestamp_trips(ts, tz):
+    if not ts: return ""
+    try:
+        ts_float = float(ts)
+        if ts_float > 3000000000: ts_float /= 1000
+        return datetime.fromtimestamp(ts_float, tz).strftime('%Y-%m-%d %H:%M:%S')
+    except: return ""
+
+def formatar_docks(dock_list):
+    if not isinstance(dock_list, list): return ""
+    return ", ".join([d.get('dock_name', 'N/A') for d in dock_list if isinstance(d, dict)])
+
+def traduzir_indicador_ontime(indicador_en):
+    mapa = {"Late Arrival": "Chegada Atrasada", "Early Arrival": "Chegada Adiantada", "Waiting": "Aguardando", "Early Departure": "Partida Adiantada", "Late Departure": "Partida Atrasada", "On-Time Arrival": "Chegada Pontual", "Potentially Late": "Potencialmente Atrasado", "Potentially Early": "Potencialmente Adiantado"}
+    return mapa.get(indicador_en, indicador_en) if indicador_en else ""
+
+def mapear_status_db_all(status_id, tipo='viagem'):
+    mapas = {'viagem': {5: "Assigned", 10: "Em Andamento", 30:"Em Trânsito", 40: "Unseal", 50: "Arrived", 60: "Unseal(?)", 90: "Concluído"}, 'parada': {0: "Pending", 5: "Assigned", 10: "Loading", 30: "Em Trânsito(?)", 40: "Unseal", 50: "Arrived", 60: "Unseal", 80: "Unloaded", 90: "Concluído"}}
+    try: return mapas[tipo].get(int(status_id), str(status_id))
+    except: return str(status_id)
+
+def determinar_turno(timestamp, tz): 
+    if not timestamp or timestamp == 0: return ""
+    try:
+        ts_float = float(timestamp)
+        if ts_float > 3000000000: ts_float = ts_float / 1000
+        dt = datetime.fromtimestamp(ts_float, tz)
+        if 6 <= dt.hour <= 13: return "T1"
+        elif 14 <= dt.hour <= 21: return "T2"
+        else: return "T3"
+    except: return ""
+
+def coletar_shopee_db_all_socs(driver):
+    logging.info("--- [SPX] DB All SOCS ---")
+    tz = pytz.timezone(TIMEZONE)
+    agora = datetime.now(tz)
+    st_sta = int((agora - timedelta(days=1)).replace(hour=0,minute=0).timestamp())
+    et_sta = int((agora + timedelta(days=3)).replace(hour=23,minute=59).timestamp())
+    
+    itens, pag = [], 1
+    while True:
+        res = executar_chamada_api(driver, 'GET', f"{ADMIN_TRIP_LIST_API}?count=100&sta={st_sta},{et_sta}&pageno={pag}", "https://spx.shopee.com.br/hubLinehaulTrips/trip")
+        if not res or not res.get("list"): break
+        itens.extend(res["list"])
+        if len(res["list"]) < 100: break
+        pag += 1
+
+    combined, proc = [], set()
+    for i in itens:
+        tid = i.get('trip_number')
+        if tid in proc: continue
+        
+        stats = i.get('trip_station', [])
+        status_geral_viagem = mapear_status_db_all(i.get('trip_status', ''), 'viagem')
+        
+        is_valid_trip = False
+        for st_info in stats:
+            seq_num = int(st_info.get('sequence_number', -1))
+            nome_estacao = st_info.get('station_name', '')
+            status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
+            
+            if seq_num == 2 and "soc" in nome_estacao.lower():
+                if status_mapped in ["Unseal", "Arrived", "Assigned"] or status_geral_viagem == "Assigned":
+                    is_valid_trip = True
+                    break
+        
+        if is_valid_trip:
+            for st_info in stats:
+                seq_num = int(st_info.get('sequence_number', -1))
+                if seq_num in [1, 2]:
+                    nome_estacao = st_info.get('station_name', '')
+                    status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
+                    combined.append([
+                        i.get('trip_number'), traduzir_indicador_ontime(st_info.get('on_time_indicator')), 
+                        i.get('vehicle_type_name'), formatar_timestamp_trips(st_info.get('sta'), tz), 
+                        formatar_timestamp_trips(st_info.get('std'), tz), formatar_timestamp_trips(st_info.get('ata'), tz), 
+                        formatar_timestamp_trips(st_info.get('atd'), tz), formatar_timestamp_trips(st_info.get('eta'), tz), 
+                        formatar_timestamp_trips(st_info.get('etd'), tz), formatar_docks(st_info.get('outbound_dock_infos')), 
+                        formatar_timestamp_trips(st_info.get('loading_time'), tz), st_info.get('unload_quantity', 0), 
+                        st_info.get('load_quantity', 0), i.get('vehicle_number'), i.get('driver_name'), 
+                        i.get('second_driver_name'), "Adhoc" if i.get('trip_source')==1 else "Schedule", 
+                        i.get('classification_names'), i.get('agency_name'), formatar_timestamp_trips(i.get('mtime'), tz), 
+                        i.get('operator'), formatar_timestamp_trips(i.get('assigned_time'), tz), 
+                        i.get('to_inbound_quantity', -1), i.get('order_inbound_quantity', -1), i.get('pack_type', ''), 
+                        i.get('order_packed_quantity', -1), i.get('to_packed_quantity', -1), i.get('to_loaded_quantity', -1), 
+                        i.get('order_loaded_quantity', -1), i.get('mtb_loaded_quantity', 0), 
+                        formatar_timestamp_trips(st_info.get('add_into_queue_time'), tz), status_mapped, 
+                        nome_estacao, determinar_turno(st_info.get('sta'), tz), seq_num
+                    ])
+            proc.add(tid)
+            
+    return combined
+
+def main():
+    sheets = get_sheets_service()
+    if not sheets: return
+
+    driver_cookie = None
+    try:
+        cookie_da_planilha = obter_cookie_da_planilha(sheets)
+        if cookie_da_planilha:
+            driver_cookie = get_driver()
+            if injetar_cookie(driver_cookie, cookie_da_planilha):
+                d_socs = coletar_shopee_db_all_socs(driver_cookie)
+                if d_socs:
+                    cabecalho_socs = [[
+                        "Trip Number", "On-Time Indicator", "Vehicle Type", "STA", "STD", "ATA", "ATD", "ETA", "ETD", 
+                        "Outbound Docks", "Loading Time", "Unload Quantity", "Load Quantity", "Vehicle Number", 
+                        "Driver Name", "Second Driver Name", "Trip Source", "Classification", "Agency Name", 
+                        "Updated Time", "Operator", "Assigned Time", "To Inbound Quantity", "Order Inbound Quantity", 
+                        "Pack Type", "Order Packed Quantity", "To Packed Quantity", "To Loaded Quantity", 
+                        "Order Loaded Quantity", "MTB Loaded Quantity", "Add Into Queue Time", "Station Status", 
+                        "Station Name", "Shift", "Sequence Number"
+                    ]]
+                    write_sheet(sheets, SOCS_SPREADSHEET_ID, ALL_TRIPS_SOCS_SHEET_NAME, cabecalho_socs + d_socs)
+        
+    except Exception as e:
+        logging.error(f"Erro Fatal Ciclo Shopee Cookie: {e}")
+    finally:
+        if driver_cookie: driver_cookie.quit()
+
+if __name__ == "__main__":
+    main()
