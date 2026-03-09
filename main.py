@@ -38,10 +38,6 @@ HISTORY_SPREADSHEET_ID = "1Q7o6xiFeImyBCjddJ7Fi_-bf2j_LvyhmEPjIfvbjF00"
 DB_ALL_SPREADSHEET_ID = "1Q7o6xiFeImyBCjddJ7Fi_-bf2j_LvyhmEPjIfvbjF00"
 ILOX_SPREADSHEET_ID = "1F56MqoX9cinl4OtOsC6VuDIMulLBz792sMB4U8mflCw"
 
-# Planilhas Extras mantidas do código original
-CONFIG_SPREADSHEET_ID = "1VC9BmvUKWH-fhjdHAU2q8R0O-HKSR2MPUk5dlufbeqM"  # Planilha de Configs do Cookie
-SOCS_SPREADSHEET_ID = "1s_lOk0ykuMZcVgha81MexIGD5JKBNr4hlkIwaT76kvw"    # Planilha Destino do DB All Socs
-
 # --- Nomes das Abas ---
 # Shopee
 PRODUTIVIDADE_SHEET_NAME = "raw_spx_workstation"
@@ -51,7 +47,6 @@ DOCK_QUEUE_SHEET_NAME = "raw_spx_dock_queue"
 QUEUE_LOG_SHEET_NAME = "queue-list-log"
 HISTORY_SHEET_NAME = "db_ended"
 ALL_TRIPS_SHEET_NAME = "db_all"
-ALL_TRIPS_SOCS_SHEET_NAME = "db_all_socs" # Aba nova do SoC
 
 # Ilox
 HOURLY_DB_ONTEM_SHEET_NAME = "hourly_db_ontem" # (1x Dia)
@@ -70,7 +65,6 @@ QUEUE_LOG_API_URL = "https://spx.shopee.com.br/api/in-station/dock_management/qu
 HISTORY_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/history/list"
 PENDING_TRIPS_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/list_v2"
 DEPARTED_TRIPS_API_URL = "https://spx.shopee.com.br/api/admin/transportation/trip/list"
-ADMIN_TRIP_LIST_API = "https://spx.shopee.com.br/api/admin/transportation/trip/list" # Usado pelo SoC
 
 # Ilox URLs
 ILOX_DASHBOARD_URL = "https://iloxconnect.com/dashboard.php"
@@ -214,51 +208,6 @@ def calcular_periodos_coleta():
         curr = prox
     return periodos
 
-# --- UTILITÁRIOS PARA LOGIN VIA COOKIE (DB ALL SOCS) ---
-def obter_cookie_da_planilha(service):
-    try:
-        logging.info("Lendo Cookie da planilha config...")
-        result = service.spreadsheets().values().get(
-            spreadsheetId=CONFIG_SPREADSHEET_ID, 
-            range="config!A1:B15"
-        ).execute()
-        rows = result.get('values', [])
-        cookie_str = ""
-        for row in rows:
-            if len(row) >= 2:
-                chave = row[0].strip().upper()
-                valor = row[1].strip()
-                if chave == "COOKIE":
-                    cookie_str = valor
-                elif chave == "FULL_HEADERS_JSON" and not cookie_str:
-                    try:
-                        headers_json = json.loads(valor)
-                        cookie_str = headers_json.get("cookie", "")
-                    except: pass
-        return cookie_str
-    except Exception as e:
-        logging.error(f"Erro ao ler planilha: {e}")
-        return ""
-
-def injetar_cookie(driver, cookie_str):
-    driver.get("https://spx.shopee.com.br/")
-    time.sleep(2)
-    if not cookie_str: return False
-    try:
-        logging.info("Injetando cookie no navegador...")
-        cookies = cookie_str.split(';')
-        for c in cookies:
-            if '=' in c:
-                name, value = c.split('=', 1)
-                driver.add_cookie({'name': name.strip(), 'value': value.strip(), 'domain': '.shopee.com.br', 'path': '/'})
-        driver.get("https://spx.shopee.com.br/hubLinehaulTrips/trip")
-        time.sleep(6)
-        if "/login" not in driver.current_url: return True
-        return False
-    except Exception as e:
-        logging.error(f"Erro ao injetar cookies: {e}")
-        return False
-
 # =================================================================
 # FUNÇÕES DE COLETA SHOPEE
 # =================================================================
@@ -339,80 +288,6 @@ def coletar_shopee_db_all(driver):
                     combined.append([i.get('trip_number'), traduzir_indicador_ontime(st.get('on_time_indicator')), i.get('vehicle_type_name'), formatar_timestamp_trips(st.get('sta'), tz), formatar_timestamp_trips(st.get('std'), tz), formatar_timestamp_trips(st.get('ata'), tz), formatar_timestamp_trips(st.get('atd'), tz), formatar_timestamp_trips(st.get('eta'), tz), formatar_timestamp_trips(st.get('etd'), tz), formatar_docks(st.get('outbound_dock_infos')), formatar_timestamp_trips(st.get('loading_time'), tz), st.get('unload_quantity', 0), st.get('load_quantity', 0), i.get('vehicle_number'), i.get('driver_name'), i.get('second_driver_name'), "Adhoc" if i.get('trip_source')==1 else "Schedule", i.get('classification_names'), i.get('agency_name'), formatar_timestamp_trips(i.get('mtime'), tz), i.get('operator'), formatar_timestamp_trips(i.get('assigned_time'), tz), i.get('to_inbound_quantity', -1), i.get('order_inbound_quantity', -1), i.get('pack_type', ''), i.get('order_packed_quantity', -1), i.get('to_packed_quantity', -1), i.get('to_loaded_quantity', -1), i.get('order_loaded_quantity', -1), i.get('mtb_loaded_quantity', 0), formatar_timestamp_trips(st.get('add_into_queue_time'), tz), mapear_status_db_all(st.get('trip_station_status'), 'parada'), stats[-1]['station_name'] if stats else '', determinar_turno(st.get('sta'), tz)])
                     proc.add(tid); break
     process(pend); process(dep, True); process(all_tr)
-    return combined
-
-def coletar_shopee_db_all_socs(driver):
-    """Nova Coleta do DB ALL focada em SOCs (Filtro Seq 1 e 2) - Usa Cookie"""
-    logging.info("--- [SPX] DB All SOCS (Filtros Ativos Seq 1 e 2) ---")
-    tz = pytz.timezone(TIMEZONE)
-    referer = "https://spx.shopee.com.br/hubLinehaulTrips/trip"
-    
-    def buscar_paginas(url_base, params_base):
-        itens, pag = [], 1
-        while True:
-            res = executar_chamada_api(driver, 'GET', f"{url_base}?{params_base}&pageno={pag}", referer)
-            if not res or not res.get("list"): break
-            itens.extend(res["list"])
-            if len(res["list"]) < 100: break
-            pag += 1
-        return itens
-        
-    agora = datetime.now(tz)
-    st_sta = int((agora - timedelta(days=1)).replace(hour=0,minute=0).timestamp())
-    et_sta = int((agora + timedelta(days=3)).replace(hour=23,minute=59).timestamp())
-    
-    ativas = buscar_paginas(ADMIN_TRIP_LIST_API, f"count=100&sta={st_sta},{et_sta}")
-    
-    combined = []
-    proc = set()
-    
-    def process(lst):
-        if not lst: return
-        for i in lst:
-            tid = i.get('trip_number')
-            if tid in proc: continue
-            
-            stats = i.get('trip_station', [])
-            status_geral_viagem = mapear_status_db_all(i.get('trip_status', ''), 'viagem')
-            
-            is_valid_trip = False
-            for st_info in stats:
-                seq_num = int(st_info.get('sequence_number', -1))
-                nome_estacao = st_info.get('station_name', '')
-                status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
-                
-                if seq_num == 2 and "soc" in nome_estacao.lower():
-                    if status_mapped in ["Unseal", "Arrived", "Assigned"] or status_geral_viagem == "Assigned":
-                        is_valid_trip = True
-                        break
-            
-            if is_valid_trip:
-                for st_info in stats:
-                    seq_num = int(st_info.get('sequence_number', -1))
-                    if seq_num in [1, 2]:
-                        nome_estacao = st_info.get('station_name', '')
-                        status_mapped = mapear_status_db_all(st_info.get('trip_station_status'), 'parada')
-                        
-                        combined.append([
-                            i.get('trip_number'), traduzir_indicador_ontime(st_info.get('on_time_indicator')), 
-                            i.get('vehicle_type_name'), formatar_timestamp_trips(st_info.get('sta'), tz), 
-                            formatar_timestamp_trips(st_info.get('std'), tz), formatar_timestamp_trips(st_info.get('ata'), tz), 
-                            formatar_timestamp_trips(st_info.get('atd'), tz), formatar_timestamp_trips(st_info.get('eta'), tz), 
-                            formatar_timestamp_trips(st_info.get('etd'), tz), formatar_docks(st_info.get('outbound_dock_infos')), 
-                            formatar_timestamp_trips(st_info.get('loading_time'), tz), st_info.get('unload_quantity', 0), 
-                            st_info.get('load_quantity', 0), i.get('vehicle_number'), i.get('driver_name'), 
-                            i.get('second_driver_name'), "Adhoc" if i.get('trip_source')==1 else "Schedule", 
-                            i.get('classification_names'), i.get('agency_name'), formatar_timestamp_trips(i.get('mtime'), tz), 
-                            i.get('operator'), formatar_timestamp_trips(i.get('assigned_time'), tz), 
-                            i.get('to_inbound_quantity', -1), i.get('order_inbound_quantity', -1), i.get('pack_type', ''), 
-                            i.get('order_packed_quantity', -1), i.get('to_packed_quantity', -1), i.get('to_loaded_quantity', -1), 
-                            i.get('order_loaded_quantity', -1), i.get('mtb_loaded_quantity', 0), 
-                            formatar_timestamp_trips(st_info.get('add_into_queue_time'), tz), status_mapped, 
-                            nome_estacao, determinar_turno(st_info.get('sta'), tz), seq_num
-                        ])
-                proc.add(tid)
-                    
-    process(ativas)
     return combined
 
 def coletar_shopee_historico_ended(driver):
@@ -653,7 +528,6 @@ def write_sheet(service, spreadsheet_id, sheet_name, data, mode="write"):
         else:
             service.spreadsheets().values().append(spreadsheetId=spreadsheet_id, range=f"'{sheet_name}'!A1", valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS", body={'values': data}).execute()
         
-        # Correção da Hora do Vercel aplicada aqui
         tz = pytz.timezone(TIMEZONE)
         ts = datetime.now(tz).strftime('%Y-%m-%d %H:%M:%S')
         
@@ -711,37 +585,6 @@ def main():
     except Exception as e: 
         logging.error(f"Erro Fatal Ciclo Shopee Senha: {e}")
         if driver: driver.quit()
-
-
-    # =========================================================
-    # BLOCO 2: SHOPEE SOCS (NOVO - LOGIN VIA COOKIE)
-    # =========================================================
-    driver_cookie = None
-    try:
-        cookie_da_planilha = obter_cookie_da_planilha(sheets)
-        if cookie_da_planilha:
-            driver_cookie = get_driver()
-            if injetar_cookie(driver_cookie, cookie_da_planilha):
-                d_socs = coletar_shopee_db_all_socs(driver_cookie)
-                if d_socs:
-                    cabecalho_socs = [[
-                        "Trip Number", "On-Time Indicator", "Vehicle Type", "STA", "STD", "ATA", "ATD", "ETA", "ETD", 
-                        "Outbound Docks", "Loading Time", "Unload Quantity", "Load Quantity", "Vehicle Number", 
-                        "Driver Name", "Second Driver Name", "Trip Source", "Classification", "Agency Name", 
-                        "Updated Time", "Operator", "Assigned Time", "To Inbound Quantity", "Order Inbound Quantity", 
-                        "Pack Type", "Order Packed Quantity", "To Packed Quantity", "To Loaded Quantity", 
-                        "Order Loaded Quantity", "MTB Loaded Quantity", "Add Into Queue Time", "Station Status", 
-                        "Station Name", "Shift", "Sequence Number"
-                    ]]
-                    write_sheet(sheets, SOCS_SPREADSHEET_ID, ALL_TRIPS_SOCS_SHEET_NAME, cabecalho_socs + d_socs)
-        
-        if driver_cookie:
-            driver_cookie.quit()
-            driver_cookie = None
-
-    except Exception as e:
-        logging.error(f"Erro Fatal Ciclo Shopee Cookie: {e}")
-        if driver_cookie: driver_cookie.quit()
 
 
     # =========================================================
